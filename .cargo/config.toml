@@ -1,0 +1,17 @@
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-clang"
+# llvm-mingw does not ship GCC's libgcc runtime, but the Rust windows-gnu
+# target still passes `-lgcc`/`-lgcc_eh` at link time. Provide empty stub
+# archives (in `libs/`) that satisfy those -l flags.
+#
+# The exception-handling runtime is linked *statically*: `-Wl,-Bstatic`
+# makes lld pick the static libunwind.a (instead of the dynamic
+# libunwind.dll.a), so the resulting .exe has no external exception-handling
+# DLL dependency (no libgcc_s_dw2-1.dll / libunwind.dll needed at runtime).
+# `-Wl,-Bdynamic` restores normal dynamic linking for the rest of the args.
+rustflags = [
+    "-C", "link-arg=-Llibs",
+    "-C", "link-arg=-Wl,-Bstatic",
+    "-C", "link-arg=-lunwind",
+    "-C", "link-arg=-Wl,-Bdynamic",
+]

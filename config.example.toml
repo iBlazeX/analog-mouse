@@ -1,0 +1,49 @@
+# stickmap configuration example.
+#
+# All values here are the defaults; you can create your own config.toml
+# (or pass one with --config) and override just the keys you care about.
+# Any CLI flag overrides the corresponding config-file value.
+
+# Which physical stick receives the mouse deltas: "right" (default) or "left".
+stick = "right"
+
+# Axis units of deflection per pixel of mouse travel. Start at ~0.02.
+# Lower  = slower camera, less twitchy. Higher = faster.
+sensitivity = 0.02
+
+# Multiplier applied to the axis each tick (125 Hz) so the stick springs
+# back toward center when the mouse stops. 1.0 = "hold" mode (stick stays
+# where you leave it). Values should be > 0 and <= 1.0.
+decay = 0.85
+
+# Ignore mouse deltas with magnitude below this many pixels before scaling.
+# Dampens sensor jitter and tiny hand tremors a lot in games.
+deadzone = 0.0
+
+# Invert the X axis (mouse left/right maps to opposite stick direction).
+invert_x = false
+
+# Invert the Y axis (mouse up/down maps to opposite stick direction).
+invert_y = false
+
+# Response curve applied to the scaled axis before clamping.
+# Options: "linear" (default) or "ease-in".
+# ease-in gives more fine control near center, more gain near the edge.
+curve = "linear"
+
+# ---- Optional extras (all off by default) ----
+
+# Map left mouse button to an X360 button. Use "none" (default) to disable,
+# or one of: A, B, X, Y, LB, RB, LS, RS, START, BACK, DPAD_UP, DPAD_DOWN,
+# DPAD_LEFT, DPAD_RIGHT.
+mouse_left_button = "none"
+
+# Map right mouse button to an X360 button (same options as above).
+mouse_right_button = "none"
+
+# Map mouse wheel up to a button. "none" (default) disables.
+# Options: same button list as above, or DPAD_UP etc.
+wheel_up = "none"
+
+# Map mouse wheel down to a button. "none" (default) disables.
+wheel_down = "none"
