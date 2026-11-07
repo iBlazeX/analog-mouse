@@ -8,11 +8,13 @@ description = "Bridge physical mouse movement to a virtual Xbox 360 right-stick 
 clap = { version = "4", features = ["derive"] }
 ctrlc = "3"
 env_logger = "0.11"
-libloading = "0.8"
 log = "0.4"
 rdev = "0.5"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+vigem-client = "0.1"
 
 [profile.release]
 opt-level = 2

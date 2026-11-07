@@ -14,7 +14,7 @@ use mouse::{Accumulators, MouseSource, RdevMouseSource};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use vgamepad::{PClient, PConnectedTarget, SendTarget, VigemClient, XUSBReport};
+use vgamepad::{VigemPad, XUSBReport};
 
 /// Tick rate of the axis loop (125 Hz => every 8 ms).
 const TICK_MS: u64 = 8;
@@ -92,13 +92,13 @@ fn main() {
         cfg.mapping.curve
     );
 
-    // Load ViGEm client DLL.
-    let vigem = match VigemClient::load() {
-        Ok(v) => v,
+    // Connect to the ViGEmBus driver and plug in the virtual pad.
+    let mut pad = match VigemPad::connect() {
+        Ok(p) => p,
         Err(e) => {
             error!("{e}");
             error!(
-                "ViGEm client library (vigemclient.dll) could not be loaded.\n\
+                "Could not reach the ViGEmBus driver.\n\
                  Please install the ViGEmBus driver from\n\
                  https://github.com/ViGEm/ViGEmBus/releases\n\
                  and try again."
@@ -108,11 +108,11 @@ fn main() {
     };
 
     if cli.selftest {
-        selftest(&vigem, &cfg.mapping);
+        selftest(&mut pad, &cfg.mapping);
         return;
     }
 
-    run(&vigem, &cfg);
+    run(&mut pad, &cfg);
 }
 /// Build an XUSB report from the current axis state and button bitmask.
 fn make_report(state: &AxisState, mapping: &MappingConfig, buttons: u16) -> XUSBReport {
@@ -136,32 +136,7 @@ fn make_report(state: &AxisState, mapping: &MappingConfig, buttons: u16) -> XUSB
 }
 
 /// Main loop: run the mouse listener + 125 Hz tick thread until Ctrl+C.
-fn run(vigem: &VigemClient, cfg: &Config) {
-    let client: PClient = vigem.alloc_client();
-    if client.is_null() {
-        error!("vigem_alloc failed (out of memory?)");
-        return;
-    }
-    if let Err(e) = vigem.connect(client) {
-        error!("vigem_connect failed: {e}");
-        error!(
-            "Please install the ViGEmBus driver from\n\
-             https://github.com/ViGEm/ViGEmBus/releases"
-        );
-        return;
-    }
-
-    let target: PConnectedTarget = vigem.alloc_target();
-    if target.is_null() {
-        error!("vigem_target_x360_alloc failed");
-        vigem.free_client(client);
-        return;
-    }
-    if let Err(e) = vigem.connect_target(client, target) {
-        error!("vigem_connect_target failed: {e}");
-        vigem.free_client(client);
-        return;
-    }
+fn run(pad: &mut VigemPad, cfg: &Config) {
     info!("virtual Xbox 360 controller connected to the bus");
 
     let acc = Arc::new(Accumulators::new());
@@ -195,9 +170,11 @@ fn run(vigem: &VigemClient, cfg: &Config) {
     })
     .ok();
 
-    // Tick thread + main sleep loop managed within a thread scope so non-'static
-    // references (to `vigem`, `cfg`, `acc`, `buttons`, `running`) are borrowed safely.
-    let target_t = SendTarget(target);
+    // Tick thread + main sleep loop managed within a thread scope so
+    // non-'static references (to `pad`, `cfg`, `acc`, `buttons`, `running`)
+    // are borrowed safely. The pad is exclusively owned by the tick thread
+    // here, so no synchronization is needed for it.
+    let pad = &mut *pad;
     std::thread::scope(|s| {
         s.spawn(|| {
             let mut state = AxisState::default();
@@ -212,7 +189,7 @@ fn run(vigem: &VigemClient, cfg: &Config) {
                     debug!("tick dx={dx} dy={dy} -> ({x},{y}) buttons=0x{btn_val:04X}");
                 }
                 let report = make_report(&state, &cfg.mapping, btn_val);
-                if let Err(e) = vigem.set_state(target_t.ptr(), &report) {
+                if let Err(e) = pad.set_state(&report) {
                     error!("set_state failed: {e}");
                 }
                 std::thread::sleep(Duration::from_millis(TICK_MS));
@@ -224,39 +201,13 @@ fn run(vigem: &VigemClient, cfg: &Config) {
         }
     });
 
-    vigem.disconnect_target(client, target);
-    vigem.free_client(client);
+    // Dropping the pad unplugs the virtual controller (happens in main).
     info!("shutdown complete");
 }
 
-/// Self-test: initialise the pad, sweep the mapped axis through a known
-/// pattern, log every value, then disconnect and exit.
-fn selftest(vigem: &VigemClient, mapping: &MappingConfig) {
-    info!("selftest: initialising virtual Xbox 360 controller");
-    let client: PClient = vigem.alloc_client();
-    if client.is_null() {
-        error!("vigem_alloc failed");
-        return;
-    }
-    if let Err(e) = vigem.connect(client) {
-        error!("vigem_connect failed: {e}");
-        error!(
-            "Please install the ViGEmBus driver from\n\
-             https://github.com/ViGEm/ViGEmBus/releases"
-        );
-        return;
-    }
-    let target: PConnectedTarget = vigem.alloc_target();
-    if target.is_null() {
-        error!("vigem_target_x360_alloc failed");
-        vigem.free_client(client);
-        return;
-    }
-    if let Err(e) = vigem.connect_target(client, target) {
-        error!("vigem_connect_target failed: {e}");
-        vigem.free_client(client);
-        return;
-    }
+/// Self-test: sweep the mapped axis through a known pattern, log every
+/// value, then exit (the caller drops the pad, unplugging the controller).
+fn selftest(pad: &mut VigemPad, mapping: &MappingConfig) {
     info!(
         "pad attached — check Game Controllers (joy.cpl) or Steam's\n\
            controller test page for the new device"
@@ -272,13 +223,11 @@ fn selftest(vigem: &VigemClient, mapping: &MappingConfig) {
         let (x, y) = state.tick(*delta, *delta, mapping);
         info!("selftest[{i:02}] delta={delta:>5} -> x={x:>6} y={y:>6}");
         let report = make_report(&state, mapping, 0);
-        if let Err(e) = vigem.set_state(target, &report) {
+        if let Err(e) = pad.set_state(&report) {
             error!("set_state failed: {e}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 
     info!("selftest complete — stick should have moved and returned to center");
-    vigem.disconnect_target(client, target);
-    vigem.free_client(client);
 }

@@ -1,2 +1,5 @@
 # target directory (build output)
 /target/
+
+# local-only agent notes
+/hermes/

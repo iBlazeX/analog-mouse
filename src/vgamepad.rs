@@ -1,10 +1,11 @@
-//! Runtime FFI to ViGEmClient (vigemclient.dll) using libloading.
+//! Virtual Xbox 360 gamepad via the pure-Rust `vigem-client` crate.
 //!
-//! We load the DLL at runtime so there is NO link-time dependency - the
-//! driver just needs to be installed on the host.
+//! The `vigem-client` crate implements the ViGEmBus client in 100% Rust,
+//! talking to the driver via WinAPI `DeviceIoControl` directly — no
+//! `vigemclient.dll` and no other external DLL is needed.
 
-use libloading::Library;
-
+/// XInput-compatible gamepad report (12 bytes, same layout as
+/// `XINPUT_GAMEPAD` / the ViGEm XUSB report).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct XUSBReport {
@@ -17,125 +18,68 @@ pub struct XUSBReport {
     pub s_thumb_ry: i16,
 }
 
-pub const VIGEM_ERROR_NONE: i32 = 0x2000_0000;
-
-fn ok(code: i32) -> Result<(), String> {
-    if code == VIGEM_ERROR_NONE {
-        Ok(())
-    } else {
-        Err(format!("ViGEm error 0x{:08X}", code))
-    }
+/// Virtual Xbox 360 pad backed by the ViGEmBus driver.
+#[cfg(windows)]
+pub struct VigemPad {
+    target: vigem_client::Xbox360Wired<vigem_client::Client>,
 }
 
-pub type PClient = *mut std::ffi::c_void;
-pub type PConnectedTarget = *mut std::ffi::c_void;
-/// Safe wrapper around a raw ViGEm target handle so it can cross threads.
-///
-/// ViGEm targets are opaque driver objects; the pointer is safe to share
-/// because all access goes through the single owning client connection.
-pub struct SendTarget(pub PConnectedTarget);
-unsafe impl Send for SendTarget {}
-unsafe impl Sync for SendTarget {}
-impl SendTarget {
-    /// The raw ViGEm target handle, for use across threads.
-    ///
-    /// Exposed through this method (rather than the public tuple field) so that
-    /// a background closure captures `&SendTarget` (which is `Sync`) instead of
-    /// borrowing the inner `*mut c_void` field directly.
-    pub fn ptr(&self) -> PConnectedTarget {
-        self.0
-    }
-}
-/// Loaded runtime wrapper around vigemclient.dll.
-pub struct VigemClient {
-    _lib: Library,
-    alloc_client: unsafe extern "C" fn() -> PClient,
-    connect: unsafe extern "C" fn(PClient) -> i32,
-    alloc_x360: unsafe extern "C" fn() -> PConnectedTarget,
-    connect_target: unsafe extern "C" fn(PClient, PConnectedTarget) -> i32,
-    x360_update: unsafe extern "C" fn(PConnectedTarget, *const XUSBReport) -> i32,
-    disconnect_target: unsafe extern "C" fn(PClient, PConnectedTarget) -> i32,
-    free: unsafe extern "C" fn(PClient),
-}
-impl VigemClient {
-    /// Load vigemclient.dll and resolve all symbols.
-    pub fn load() -> Result<Self, String> {
-        unsafe {
-            let lib = Library::new("vigemclient.dll")
-                .map_err(|e| format!("failed to load vigemclient.dll: {e}"))?;
-
-            // Dereference each `Symbol` to a plain fn pointer immediately so
-            // the temporary borrow of `lib` ends before it is moved into Self.
-            let alloc_client: unsafe extern "C" fn() -> PClient = *lib
-                .get(b"vigem_alloc\0")
-                .map_err(|e| format!("symbol vigem_alloc missing: {e}"))?;
-            let connect: unsafe extern "C" fn(PClient) -> i32 = *lib
-                .get(b"vigem_connect\0")
-                .map_err(|e| format!("symbol vigem_connect missing: {e}"))?;
-            let alloc_x360: unsafe extern "C" fn() -> PConnectedTarget = *lib
-                .get(b"vigem_target_x360_alloc\0")
-                .map_err(|e| format!("symbol vigem_target_x360_alloc missing: {e}"))?;
-            let connect_target: unsafe extern "C" fn(PClient, PConnectedTarget) -> i32 = *lib
-                .get(b"vigem_connect_target\0")
-                .map_err(|e| format!("symbol vigem_connect_target missing: {e}"))?;
-            let x360_update: unsafe extern "C" fn(PConnectedTarget, *const XUSBReport) -> i32 =
-                *lib.get(b"vigem_target_x360_update\0")
-                    .map_err(|e| format!("symbol vigem_target_x360_update missing: {e}"))?;
-            let disconnect_target: unsafe extern "C" fn(PClient, PConnectedTarget) -> i32 = *lib
-                .get(b"vigem_disconnect_target\0")
-                .map_err(|e| format!("symbol vigem_disconnect_target missing: {e}"))?;
-            let free: unsafe extern "C" fn(PClient) = *lib
-                .get(b"vigem_free\0")
-                .map_err(|e| format!("symbol vigem_free missing: {e}"))?;
-
-            Ok(Self {
-                _lib: lib,
-                alloc_client,
-                connect,
-                alloc_x360,
-                connect_target,
-                x360_update,
-                disconnect_target,
-                free,
-            })
-        }
-    }
-
-    /// Create a new client handle.
-    pub fn alloc_client(&self) -> PClient {
-        unsafe { (self.alloc_client)() }
-    }
-
-    /// Connect to the ViGEmBus driver. Errors out when the driver is absent.
-    pub fn connect(&self, client: PClient) -> Result<(), String> {
-        unsafe { ok((self.connect)(client)) }
-    }
-
-    /// Create a new Xbox 360 target handle.
-    pub fn alloc_target(&self) -> PConnectedTarget {
-        unsafe { (self.alloc_x360)() }
-    }
-
-    /// Plug the target into the bus (device becomes visible to Windows).
-    pub fn connect_target(&self, client: PClient, target: PConnectedTarget) -> Result<(), String> {
-        unsafe { ok((self.connect_target)(client, target)) }
+#[cfg(windows)]
+impl VigemPad {
+    /// Connect to the ViGEmBus driver, plug in a virtual Xbox 360 pad, and
+    /// wait until it is ready. The pad is unplugged automatically on drop.
+    pub fn connect() -> Result<Self, String> {
+        let client = vigem_client::Client::connect()
+            .map_err(|e| format!("failed to connect to ViGEmBus driver: {e}"))?;
+        let mut target =
+            vigem_client::Xbox360Wired::new(client, vigem_client::TargetId::XBOX360_WIRED);
+        target
+            .plugin()
+            .map_err(|e| format!("failed to plug in virtual Xbox 360 controller: {e}"))?;
+        target
+            .wait_ready()
+            .map_err(|e| format!("virtual Xbox 360 controller not ready: {e}"))?;
+        Ok(Self { target })
     }
 
     /// Push a full XUSB report to the virtual pad.
-    pub fn set_state(&self, target: PConnectedTarget, report: &XUSBReport) -> Result<(), String> {
-        unsafe { ok((self.x360_update)(target, report)) }
+    pub fn set_state(&mut self, report: &XUSBReport) -> Result<(), String> {
+        let gamepad = vigem_client::XGamepad {
+            buttons: vigem_client::XButtons::from(report.w_buttons),
+            left_trigger: report.b_left_trigger,
+            right_trigger: report.b_right_trigger,
+            thumb_lx: report.s_thumb_lx,
+            thumb_ly: report.s_thumb_ly,
+            thumb_rx: report.s_thumb_rx,
+            thumb_ry: report.s_thumb_ry,
+        };
+        self.target
+            .update(&gamepad)
+            .map_err(|e| format!("failed to update virtual Xbox 360 controller: {e}"))
+    }
+}
+
+/// Stub for non-Windows hosts so the crate still compiles / tests
+/// (e.g. `cargo test` on Linux) without the Windows-only `vigem-client`.
+#[cfg(not(windows))]
+pub struct VigemPad {
+    _private: (),
+}
+
+#[cfg(not(windows))]
+impl VigemPad {
+    /// Connect to the ViGEmBus driver (Windows only).
+    pub fn connect() -> Result<Self, String> {
+        Err(
+            "ViGEmBus driver is only available on Windows (install it from \
+             https://github.com/ViGEm/ViGEmBus/releases)"
+                .to_string(),
+        )
     }
 
-    /// Unplug and release the target.
-    pub fn disconnect_target(&self, client: PClient, target: PConnectedTarget) {
-        unsafe {
-            (self.disconnect_target)(client, target);
-        }
-    }
-
-    /// Free the client handle (must be the last ViGEm call).
-    pub fn free_client(&self, client: PClient) {
-        unsafe { (self.free)(client) }
+    /// Push a full XUSB report to the virtual pad (Windows only).
+    pub fn set_state(&mut self, _report: &XUSBReport) -> Result<(), String> {
+        Err("ViGEmBus driver is only available on Windows".to_string())
     }
 }
 
